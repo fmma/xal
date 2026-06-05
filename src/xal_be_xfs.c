@@ -188,6 +188,10 @@ xal_be_xfs_close(struct xal *xal)
 		return;
 	}
 
+	if (xal->shared_view) {
+		return;
+	}
+
 	be = (struct xal_be_xfs *)&xal->be;
 
 	if (xal->dev && be->buf) {
