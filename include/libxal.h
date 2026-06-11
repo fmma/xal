@@ -204,6 +204,18 @@ bool
 xal_is_dirty(struct xal *xal);
 
 /**
+ * Mark the xal representation as dirty.
+ *
+ * Forces the dirty flag without waiting for the filesystem watcher, so a caller
+ * that just changed the filesystem (e.g. an allocating write) can guarantee the
+ * next extent resolution sees it as stale and re-indexes. Idempotent.
+ *
+ * @param xal The xal struct obtained when opened with xal_open()
+ */
+void
+xal_mark_dirty(struct xal *xal);
+
+/**
  * Returns the current value of the sequence lock.
  * 
  * An uneven number indicates the struct is being modified and is not safe to read. An even number

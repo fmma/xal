@@ -345,6 +345,12 @@ xal_is_dirty(struct xal *xal)
 	return atomic_load(xal->dirty);
 }
 
+void
+xal_mark_dirty(struct xal *xal)
+{
+	atomic_store(xal->dirty, true);
+}
+
 int
 xal_get_seq_lock(struct xal *xal)
 {
@@ -408,7 +414,7 @@ xal_from_shm(const char *shm_name, struct xal **out)
 	xal->sb = state->sb;
 
 	if (atomic_load(xal->dirty)) {
-		err = -EINVAL;
+		err = -ESTALE;
 		goto unmap_state;
 	}
 

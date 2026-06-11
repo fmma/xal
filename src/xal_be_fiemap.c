@@ -40,6 +40,10 @@ xal_be_fiemap_close(struct xal *xal)
 		return;
 	}
 
+	if (xal->shared_view) {
+		return;
+	}
+
 	be = (struct xal_be_fiemap *)&xal->be;
 
 	if (be->inotify) {
