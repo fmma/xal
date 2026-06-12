@@ -54,13 +54,30 @@ xal_fsbno_offset(struct xal *xal, uint64_t fsbno)
 struct xal_inode *
 xal_inode_at(struct xal *xal, uint32_t idx)
 {
+	/* Clamp to the mapped capacity. A torn cross-process read (the pools are
+	 * rewritten in place, so a reader can observe a half-written index) must
+	 * not fault: return mapped (if wrong) memory and let the seqlock reject
+	 * the snapshot. Normal callers always pass an in-range idx, so the clamp
+	 * is a no-op on the hot path. */
+	if (idx >= xal->inodes.reserved) {
+		idx = 0;
+	}
 	return (struct xal_inode *)xal->inodes.memory + idx;
 }
 
 struct xal_extent *
 xal_extent_at(struct xal *xal, uint32_t idx)
 {
+	if (idx >= xal->extents.reserved) {
+		idx = 0;
+	}
 	return (struct xal_extent *)xal->extents.memory + idx;
+}
+
+uint32_t
+xal_extent_capacity(struct xal *xal)
+{
+	return (uint32_t)xal->extents.reserved;
 }
 
 uint32_t
@@ -262,6 +279,7 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 
 		(*xal)->state = state;
 		(*xal)->dirty = &state->dirty;
+		(*xal)->seq_lock = &state->seq_lock;
 
 		state->type = opts->be;
 		state->sb = (*xal)->sb;
@@ -354,7 +372,7 @@ xal_mark_dirty(struct xal *xal)
 int
 xal_get_seq_lock(struct xal *xal)
 {
-	return atomic_load(&xal->seq_lock);
+	return atomic_load(xal->seq_lock);
 }
 
 const struct xal_sb *
@@ -411,6 +429,7 @@ xal_from_shm(const char *shm_name, struct xal **out)
 
 	xal->state = state;
 	xal->dirty = &state->dirty;
+	xal->seq_lock = &state->seq_lock;
 	xal->sb = state->sb;
 
 	if (atomic_load(xal->dirty)) {

@@ -259,7 +259,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				path[dir_inode->namelen + 1 + strlen(event->name)] = '\0';
 
 				XAL_DEBUG("INFO: got full path of event: %s", path);
-				atomic_fetch_add(&xal->seq_lock, 1);
+				atomic_fetch_add(xal->seq_lock, 1);
 
 				for (uint32_t j = 0; j < dir_inode->content.dentries.count; ++j) {
 					struct xal_inode *child = xal_inode_at(xal, dir_inode->content.dentries.inodes_idx + j);
@@ -297,7 +297,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				XAL_DEBUG("INFO: finished reprocessing inode:");
 				XAL_DEBUG_FCALL(xal_inode_pp, xal, inode);
 
-				atomic_fetch_add(&xal->seq_lock, 1);
+				atomic_fetch_add(xal->seq_lock, 1);
 
 			} else if (event->mask & (IN_CREATE | IN_DELETE | IN_MOVE)) {
 				XAL_DEBUG("INFO: File system has changed, event mask:%s", mask_pp);
@@ -313,7 +313,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 	return 0;
 
 failed_with_lock:
-	atomic_fetch_add(&xal->seq_lock, 1);
+	atomic_fetch_add(xal->seq_lock, 1);
 
 	return err;
 }
@@ -336,6 +336,20 @@ background_thread_start(void *arg)
 
 	while (!atomic_load(&be->inotify->stop)) {
 		if (atomic_load(xal->dirty)) {
+			/* The filesystem changed: either a breaking event below, or an
+			 * external mark-dirty. Re-index here, on the watch thread, so a
+			 * single mutator serializes the in-place rewrite while the
+			 * seqlock lets cross-process readers detect it. The callback
+			 * clears dirty on success. */
+			if (be->inotify->cb) {
+				be->inotify->cb(xal, be->inotify->cb_args);
+			}
+			if (atomic_load(xal->dirty)) {
+				/* No reindexer wired, or the re-index failed: back off so
+				 * we do not busy-spin while the xal stays dirty. */
+				struct pollfd pfd = { .fd = be->inotify->fd, .events = POLLIN };
+				poll(&pfd, 1, 100);
+			}
 			continue;
 		}
 
@@ -351,11 +365,10 @@ background_thread_start(void *arg)
 		}
 
 		if (err) {
+			/* Breaking change: flag dirty and let the dirty branch at the
+			 * top of the next iteration drive the re-index. */
 			XAL_DEBUG("INFO: Found breaking changes, setting xal->dirty to true");
 			atomic_store(xal->dirty, true);
-			if (be->inotify->cb) {
-				be->inotify->cb(xal, be->inotify->cb_args);
-			}
 		}
 	}
 

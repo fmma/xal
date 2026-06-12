@@ -228,6 +228,20 @@ xal_mark_dirty(struct xal *xal);
 int
 xal_get_seq_lock(struct xal *xal);
 
+/**
+ * Return the extent pool capacity (maximum number of extents).
+ *
+ * The capacity is fixed at xal_open() and unchanged by re-indexing, so a reader
+ * can use it to bound an extent count/index read from the shared pools before
+ * dereferencing, guarding against a torn concurrent rewrite.
+ *
+ * @param xal The xal struct obtained when opened with xal_open()
+ *
+ * @return the maximum number of extents the pool can hold
+ */
+uint32_t
+xal_extent_capacity(struct xal *xal);
+
 const struct xal_sb *
 xal_get_sb(struct xal *xal);
 
