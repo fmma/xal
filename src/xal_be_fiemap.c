@@ -43,6 +43,10 @@ xal_be_fiemap_close(struct xal *xal)
 		return;
 	}
 
+	if (xal->shared_view) {
+		return;
+	}
+
 	be = (struct xal_be_fiemap *)&xal->be;
 
 	if (be->inotify) {
@@ -169,6 +173,7 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 
 	cand->root_idx = XAL_POOL_IDX_NONE;
 	cand->dirty = &cand->_dirty_storage;
+	cand->seq_lock = &cand->_seq_lock_storage;
 
 	be = (struct xal_be_fiemap *)&cand->be;
 
@@ -649,7 +654,7 @@ xal_be_fiemap_index(struct xal *xal)
 	}
 
 	XAL_DEBUG("INFO: waiting for xal lock");
-	atomic_fetch_add(&xal->seq_lock, 1);
+	atomic_fetch_add(xal->seq_lock, 1);
 
 	xal_pool_clear(&xal->inodes);
 	xal_pool_clear(&xal->extents);
@@ -691,7 +696,7 @@ xal_be_fiemap_index(struct xal *xal)
 	atomic_store(xal->dirty, false);
 
 exit:
-	atomic_fetch_add(&xal->seq_lock, 1);
+	atomic_fetch_add(xal->seq_lock, 1);
 
 	return err;
 }

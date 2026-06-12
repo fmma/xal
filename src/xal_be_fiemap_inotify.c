@@ -35,16 +35,18 @@ xal_be_fiemap_inotify_close(struct xal_inotify *inotify)
 
 	inode_map = inotify->inode_map;
 
+	if (inotify->flag & XAL_BE_FIEMAP_INOTIFY_RUNNING) {
+		atomic_store(&inotify->stop, true);
+		pthread_join(inotify->watch_thread_id, NULL);
+		inotify->flag &= ~XAL_BE_FIEMAP_INOTIFY_RUNNING;
+	}
+
 	if (inode_map) {
 		kh_destroy(wd_to_inode, inode_map);
 	}
 
 	if (inotify->fd) {
 		close(inotify->fd);
-	}
-
-	if (inotify->flag & XAL_BE_FIEMAP_INOTIFY_RUNNING) {
-		pthread_cancel(inotify->watch_thread_id);
 	}
 }
 
@@ -57,6 +59,7 @@ xal_be_fiemap_inotify_init(struct xal_inotify *inotify, enum xal_watchmode watch
 	}
 
 	inotify->watch_mode = watch_mode;
+	atomic_init(&inotify->stop, false);
 
 	if (!inotify->watch_mode) {
 		XAL_DEBUG("INFO: Skipping xal_be_fiemap_inotify_init(), watch mode none given");
@@ -256,7 +259,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				path[dir_inode->namelen + 1 + strlen(event->name)] = '\0';
 
 				XAL_DEBUG("INFO: got full path of event: %s", path);
-				atomic_fetch_add(&xal->seq_lock, 1);
+				atomic_fetch_add(xal->seq_lock, 1);
 
 				for (uint32_t j = 0; j < dir_inode->content.dentries.count; ++j) {
 					struct xal_inode *child = xal_inode_at(xal, dir_inode->content.dentries.inodes_idx + j);
@@ -294,7 +297,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				XAL_DEBUG("INFO: finished reprocessing inode:");
 				XAL_DEBUG_FCALL(xal_inode_pp, xal, inode);
 
-				atomic_fetch_add(&xal->seq_lock, 1);
+				atomic_fetch_add(xal->seq_lock, 1);
 
 			} else if (event->mask & (IN_CREATE | IN_DELETE | IN_MOVE)) {
 				XAL_DEBUG("INFO: File system has changed, event mask:%s", mask_pp);
@@ -310,7 +313,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 	return 0;
 
 failed_with_lock:
-	atomic_fetch_add(&xal->seq_lock, 1);
+	atomic_fetch_add(xal->seq_lock, 1);
 
 	return err;
 }
@@ -331,14 +334,27 @@ background_thread_start(void *arg)
 
 	be->inotify->flag |= XAL_BE_FIEMAP_INOTIFY_RUNNING;
 
-	err = pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
-	if (err) {
-		XAL_DEBUG("FAILED: pthread_setcancelstate(), exit thread; err(%d)", err);
-		goto exit_thread;
-	}
-
-	while (1) {
+	while (!atomic_load(&be->inotify->stop)) {
 		if (atomic_load(xal->dirty)) {
+			/* The filesystem changed: either a breaking event below, or an
+			 * external mark-dirty. Re-index here, on the watch thread, so a
+			 * single mutator serializes the in-place rewrite while the
+			 * seqlock lets cross-process readers detect it. The callback
+			 * clears dirty on success. */
+			if (be->inotify->cb) {
+				be->inotify->cb(xal, be->inotify->cb_args);
+			}
+			if (atomic_load(xal->dirty)) {
+				/* No reindexer wired, or the re-index failed: back off so
+				 * we do not busy-spin while the xal stays dirty. */
+				struct pollfd pfd = { .fd = be->inotify->fd, .events = POLLIN };
+				poll(&pfd, 1, 100);
+			}
+			continue;
+		}
+
+		struct pollfd pfd = { .fd = be->inotify->fd, .events = POLLIN };
+		if (poll(&pfd, 1, 100) <= 0) {
 			continue;
 		}
 
@@ -349,20 +365,18 @@ background_thread_start(void *arg)
 		}
 
 		if (err) {
+			/* Breaking change: flag dirty and let the dirty branch at the
+			 * top of the next iteration drive the re-index. */
 			XAL_DEBUG("INFO: Found breaking changes, setting xal->dirty to true");
 			atomic_store(xal->dirty, true);
-			if (be->inotify->cb) {
-				be->inotify->cb(xal, be->inotify->cb_args);
-			}
 		}
-
 	}
 
 exit_thread:
-	XAL_DEBUG("INFO: unlocked xal lock");
-
-	be->inotify->flag &= ~XAL_BE_FIEMAP_INOTIFY_RUNNING;
-	pthread_exit((void *)(intptr_t)err);
+	if (be->inotify) {
+		be->inotify->flag &= ~XAL_BE_FIEMAP_INOTIFY_RUNNING;
+	}
+	return (void *)(intptr_t)err;
 }
 
 int
@@ -401,6 +415,7 @@ xal_watch_filesystem(struct xal *xal, xal_dirty_cb cb, void *cb_args)
 
 	be->inotify->cb = cb;
 	be->inotify->cb_args = cb_args;
+	atomic_store(&be->inotify->stop, false);
 
 	err = pthread_create(&be->inotify->watch_thread_id, NULL, &background_thread_start, xal);
 	if (err) {
@@ -435,15 +450,15 @@ xal_stop_watching_filesystem(struct xal *xal)
 		return -EINVAL;
 	}
 
-	if (be->inotify->flag & ~XAL_BE_FIEMAP_INOTIFY_RUNNING) {
-		XAL_DEBUG("FAILED: thread is not running");
-		return -EINVAL;
+	if (!(be->inotify->flag & XAL_BE_FIEMAP_INOTIFY_RUNNING)) {
+		XAL_DEBUG("SKIPPED: thread is not running");
+		return 0;
 	}
 
-	pthread_cancel(be->inotify->watch_thread_id);
-	err = pthread_cancel(be->inotify->watch_thread_id);
+	atomic_store(&be->inotify->stop, true);
+	err = pthread_join(be->inotify->watch_thread_id, NULL);
 	if (err) {
-		XAL_DEBUG("FAILED: pthread_cancel(); err(%d)", err);
+		XAL_DEBUG("FAILED: pthread_join(); err(%d)", err);
 		return -err;
 	}
 

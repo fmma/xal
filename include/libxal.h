@@ -204,6 +204,18 @@ bool
 xal_is_dirty(struct xal *xal);
 
 /**
+ * Mark the xal representation as dirty.
+ *
+ * Forces the dirty flag without waiting for the filesystem watcher, so a caller
+ * that just changed the filesystem (e.g. an allocating write) can guarantee the
+ * next extent resolution sees it as stale and re-indexes. Idempotent.
+ *
+ * @param xal The xal struct obtained when opened with xal_open()
+ */
+void
+xal_mark_dirty(struct xal *xal);
+
+/**
  * Returns the current value of the sequence lock.
  * 
  * An uneven number indicates the struct is being modified and is not safe to read. An even number
@@ -215,6 +227,20 @@ xal_is_dirty(struct xal *xal);
  */
 int
 xal_get_seq_lock(struct xal *xal);
+
+/**
+ * Return the extent pool capacity (maximum number of extents).
+ *
+ * The capacity is fixed at xal_open() and unchanged by re-indexing, so a reader
+ * can use it to bound an extent count/index read from the shared pools before
+ * dereferencing, guarding against a torn concurrent rewrite.
+ *
+ * @param xal The xal struct obtained when opened with xal_open()
+ *
+ * @return the maximum number of extents the pool can hold
+ */
+uint32_t
+xal_extent_capacity(struct xal *xal);
 
 const struct xal_sb *
 xal_get_sb(struct xal *xal);
